@@ -35,43 +35,48 @@ def pixelate_minecraft(
     image = image.convert("RGB")
     original_size = image.size
 
-    # Mild punch-up only -- enough to read as "stylized", not enough to wash out detail
     image = ImageEnhance.Contrast(image).enhance(contrast_boost)
     image = ImageEnhance.Color(image).enhance(saturation_boost)
 
-    # Downscale with a high-quality filter first so each block represents a clean
-    # average of that region (instead of NEAREST picking one random source pixel,
-    # which is what caused the "confetti" look).
     small_size = (
         max(1, original_size[0] // block_size),
         max(1, original_size[1] // block_size),
     )
-    small = image.resize(small_size, resample=Image.BOX)
+    # LANCZOS here keeps edges/detail sharper going into the downscale than a plain
+    # box average would, which matters once we quantize to a limited palette next.
+    small = image.resize(small_size, resample=Image.LANCZOS)
 
     if use_custom_palette:
         pal_img = build_palette_image(MINECRAFT_PALETTE)
         small = small.quantize(palette=pal_img, dither=Image.NONE).convert("RGB")
     else:
-        # A generous adaptive palette keeps the photo recognizable while still
-        # giving that "limited color" game-art feel.
         small = small.convert("P", palette=Image.ADAPTIVE, colors=palette_colors, dither=Image.NONE).convert("RGB")
 
-    # Upscale back with NEAREST -- this is what gives the hard, crisp block edges.
     result = small.resize(original_size, resample=Image.NEAREST)
     return result
 
 
-def add_block_shading(image: Image.Image, block_size: int, intensity: float = 0.04) -> Image.Image:
-    """Very subtle per-block brightness variance so blocks don't look perfectly flat.
-    Kept low-intensity on purpose -- too much turns into visual noise."""
-    arr = np.array(image).astype(np.float32)
+def add_block_bevel(image: Image.Image, block_size: int, highlight: int = 16, shadow: int = 16) -> Image.Image:
+    """
+    Adds a subtle highlight on each block's top/left edge and a shadow on its
+    bottom/right edge -- a classic 2D trick for faking a 3D 'cube face' look.
+    This is what makes blocks read as individual voxels instead of flat color
+    patches, without needing any real 3D rendering.
+    """
+    if block_size < 4:
+        return image  # bevel isn't meaningful on blocks this small
+
+    arr = np.array(image).astype(np.int16)
     h, w, _ = arr.shape
-    rng = np.random.default_rng(42)
 
     for y in range(0, h, block_size):
-        for x in range(0, w, block_size):
-            shade = rng.uniform(1 - intensity, 1 + intensity)
-            arr[y:y + block_size, x:x + block_size] *= shade
+        arr[y:y + 1, :, :] += highlight
+    for x in range(0, w, block_size):
+        arr[:, x:x + 1, :] += highlight
+    for y in range(block_size - 1, h, block_size):
+        arr[y:y + 1, :, :] -= shadow
+    for x in range(block_size - 1, w, block_size):
+        arr[:, x:x + 1, :] -= shadow
 
     arr = np.clip(arr, 0, 255).astype(np.uint8)
     return Image.fromarray(arr)
@@ -83,5 +88,5 @@ def full_pipeline(
     use_custom_palette: bool = False,
 ) -> Image.Image:
     img = pixelate_minecraft(image, block_size=block_size, use_custom_palette=use_custom_palette)
-    img = add_block_shading(img, block_size=block_size, intensity=0.04)
+    img = add_block_bevel(img, block_size=block_size, highlight=16, shadow=16)
     return img
