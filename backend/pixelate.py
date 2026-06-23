@@ -1,9 +1,6 @@
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
 
-# Optional curated palette -- kept for anyone who wants the literal "limited Minecraft
-# block colors" look later, but it is OFF by default because it destroys most of the
-# original photo's color information.
 MINECRAFT_PALETTE = [
     (63, 53, 46), (94, 73, 51), (122, 97, 62),
     (90, 130, 50), (60, 110, 40), (40, 80, 30),
@@ -24,6 +21,18 @@ def build_palette_image(colors):
     return pal_img
 
 
+def suggest_block_size(image: Image.Image, target_blocks_across: int = 90) -> int:
+    """
+    Auto-picks a sensible block size based on image resolution, so a default
+    upload looks good without the user needing to fiddle with the slider.
+    Smaller photos get smaller blocks; large photos get bigger ones, aiming
+    for roughly the same number of blocks across the width either way.
+    """
+    width, _ = image.size
+    suggested = max(4, round(width / target_blocks_across))
+    return min(suggested, 64)
+
+
 def pixelate_minecraft(
     image: Image.Image,
     block_size: int = 16,
@@ -31,6 +40,7 @@ def pixelate_minecraft(
     palette_colors: int = 48,
     contrast_boost: float = 1.1,
     saturation_boost: float = 1.15,
+    edge_sharpen: bool = True,
 ) -> Image.Image:
     image = image.convert("RGB")
     original_size = image.size
@@ -38,12 +48,15 @@ def pixelate_minecraft(
     image = ImageEnhance.Contrast(image).enhance(contrast_boost)
     image = ImageEnhance.Color(image).enhance(saturation_boost)
 
+    if edge_sharpen:
+        # Makes object boundaries (e.g. a mountain silhouette against the sky)
+        # pop more clearly before they get averaged into blocks.
+        image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=120, threshold=2))
+
     small_size = (
         max(1, original_size[0] // block_size),
         max(1, original_size[1] // block_size),
     )
-    # LANCZOS here keeps edges/detail sharper going into the downscale than a plain
-    # box average would, which matters once we quantize to a limited palette next.
     small = image.resize(small_size, resample=Image.LANCZOS)
 
     if use_custom_palette:
@@ -56,15 +69,21 @@ def pixelate_minecraft(
     return result
 
 
-def add_block_bevel(image: Image.Image, block_size: int, highlight: int = 16, shadow: int = 16) -> Image.Image:
+def add_block_bevel(image: Image.Image, block_size: int, strength: float = 1.0) -> Image.Image:
     """
-    Adds a subtle highlight on each block's top/left edge and a shadow on its
-    bottom/right edge -- a classic 2D trick for faking a 3D 'cube face' look.
-    This is what makes blocks read as individual voxels instead of flat color
-    patches, without needing any real 3D rendering.
+    Adds a highlight on each block's top/left edge and a shadow on its
+    bottom/right edge -- fakes a 3D 'cube face' look in pure 2D.
+    Bevel strength is scaled relative to block size so it looks proportional
+    whether blocks are tiny or huge.
     """
     if block_size < 4:
-        return image  # bevel isn't meaningful on blocks this small
+        return image
+
+    # Bigger blocks can take a stronger bevel without looking noisy;
+    # tiny blocks need a much lighter touch.
+    base_amount = max(6, min(24, block_size))
+    highlight = int(base_amount * strength)
+    shadow = int(base_amount * strength)
 
     arr = np.array(image).astype(np.int16)
     h, w, _ = arr.shape
@@ -84,9 +103,12 @@ def add_block_bevel(image: Image.Image, block_size: int, highlight: int = 16, sh
 
 def full_pipeline(
     image: Image.Image,
-    block_size: int = 16,
+    block_size: int = None,
     use_custom_palette: bool = False,
 ) -> Image.Image:
+    if block_size is None:
+        block_size = suggest_block_size(image)
+
     img = pixelate_minecraft(image, block_size=block_size, use_custom_palette=use_custom_palette)
-    img = add_block_bevel(img, block_size=block_size, highlight=16, shadow=16)
+    img = add_block_bevel(img, block_size=block_size)
     return img
